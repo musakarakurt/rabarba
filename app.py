@@ -1,35 +1,44 @@
 import os
 import json
-from flask import Flask, redirect, request, session
+import random
+from flask import Flask, request, redirect, session, url_for
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 
-# Flask uygulaması
-app = Flask(__name__)
-app.secret_key = os.getenv("FLASK_SECRET", "supersecret")
+# Flask setup
+app = Flask(_name_)
+app.secret_key = os.getenv("FLASK_SECRET", "secret-key")
 
-# Spotify API ayarları
+# Spotify credentials
 CLIENT_ID = os.getenv("SPOTIPY_CLIENT_ID")
 CLIENT_SECRET = os.getenv("SPOTIPY_CLIENT_SECRET")
 REDIRECT_URI = os.getenv("SPOTIPY_REDIRECT_URI")
-SHOW_ID = "40ORgVQqJWPQGRMUXmL67y"  # Rabarba show ID
+SCOPE = "user-library-read playlist-modify-private playlist-modify-public"
 
-SCOPE = "user-read-playback-state,user-modify-playback-state,playlist-modify-public"
+# Show ID (Rabarba podcast)
+SHOW_ID = "1GXG3jPwGZUl3P8AWxu7F8"  # örnek ID
 
 # Konuk filtresi
-guests = [
-    "Nuri Çetin",
-    "Kemal Ayça",
-    "İlker Gümüşoluk",
-    "Anlatan Adam",
-    "Anlatanadam",
-    "Alper Çelik",
-    "Ömür Okumuş",
-    "Erman Arıcasoy",
+GUESTS = [
+    "nuri çetin",
+    "kemal ayça",
+    "ilker gümüşoluk",
+    "anlatan adam",
+    "anlatanadam",
+    "alper çelik",
+    "ömür okumuş",
+    "erman arıcasoy"
 ]
 
+# JSON dosyaları
+QUEUE_FILE = "queue.json"
+UNPLAYED_FILE = "unplayed.json"
+
+
+# ================= Spotify Helper =================
 def get_spotify():
-    return spotipy.Spotify(auth=session.get("token_info", {}).get("access_token"))
+    return spotipy.Spotify(auth=session.get("token"))
+
 
 def fetch_all_episodes(sp):
     all_eps = []
@@ -45,74 +54,137 @@ def fetch_all_episodes(sp):
         offset += limit
     return all_eps
 
-def save_queue(data):
-    with open("queue.json", "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
 
-def load_queue():
-    if os.path.exists("queue.json"):
-        with open("queue.json", "r", encoding="utf-8") as f:
-            return json.load(f)
-    return []
+def filter_episodes(episodes):
+    """Konuk filtresi + 0853 sonrası bölümleri alma"""
+    filtered = []
+    for ep in episodes:
+        name = ep.get("name", "").lower()
+        desc = ep.get("description", "").lower()
 
+        # Sadece filtredeki isimler varsa
+        if any(g in name or g in desc for g in GUESTS):
+            # 0853 sonrası gelenleri alma
+            if "853" not in name and "0853" not in name:
+                filtered.append(ep)
+
+    # A/B sıralaması
+    filtered.sort(key=lambda x: x.get("name", ""))
+    return filtered
+
+
+# ================= Routes =================
 @app.route("/")
 def index():
-    return redirect("/view_queue")
+    if not session.get("token"):
+        return '<a href="/login">Log In with Spotify</a>'
+    return """
+    <h2>Spotify Rabarba App</h2>
+    <ul>
+        <li><a href="/load_podcast">Load Podcast</a></li>
+        <li><a href="/sync_playlist">Sync Playlist (Choosen)</a></li>
+        <li><a href="/sync_unplayed">Sync Playlist (Unplayed)</a></li>
+        <li><a href="/view_queue">View Queue</a></li>
+    </ul>
+    """
+
 
 @app.route("/login")
 def login():
-    sp_oauth = SpotifyOAuth(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI, scope=SCOPE)
-    auth_url = sp_oauth.get_authorize_url()
-    return redirect(auth_url)
+    auth_manager = SpotifyOAuth(
+        client_id=CLIENT_ID,
+        client_secret=CLIENT_SECRET,
+        redirect_uri=REDIRECT_URI,
+        scope=SCOPE
+    )
+    return redirect(auth_manager.get_authorize_url())
+
 
 @app.route("/callback")
 def callback():
-    sp_oauth = SpotifyOAuth(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI, scope=SCOPE)
+    auth_manager = SpotifyOAuth(
+        client_id=CLIENT_ID,
+        client_secret=CLIENT_SECRET,
+        redirect_uri=REDIRECT_URI,
+        scope=SCOPE
+    )
     code = request.args.get("code")
-    token_info = sp_oauth.get_access_token(code, as_dict=True)
-    session["token_info"] = token_info
-    return redirect("/view_queue")
+    token_info = auth_manager.get_access_token(code, as_dict=True)
+    session["token"] = token_info["access_token"]
+    return redirect(url_for("index"))
+
 
 @app.route("/load_podcast")
 def load_podcast():
-    try:
-        sp = get_spotify()
-        episodes = fetch_all_episodes(sp)
+    sp = get_spotify()
+    episodes = fetch_all_episodes(sp)
+    filtered = filter_episodes(episodes)
 
-        # Filtre uygula
-        filtered = []
-        for ep in episodes:
-            title = ep.get("name", "")
-            if any(g.lower() in title.lower() for g in guests):
-                filtered.append({
-                    "id": ep["id"],
-                    "name": title,
-                    "release_date": ep.get("release_date"),
-                    "uri": ep.get("uri")
-                })
+    with open(QUEUE_FILE, "w", encoding="utf-8") as f:
+        json.dump(filtered, f, ensure_ascii=False, indent=2)
 
-        # Tarihe göre eskiden yeniye sırala
-        filtered.sort(key=lambda x: x["release_date"])
+    with open(UNPLAYED_FILE, "w", encoding="utf-8") as f:
+        json.dump(filtered, f, ensure_ascii=False, indent=2)
 
-        # Kuyruğu kaydet
-        save_queue(filtered)
+    return {"queued": len(filtered), "total": len(episodes)}
 
-        return {"queued": len(filtered), "total": len(episodes)}
-    except Exception as e:
-        return {"error": str(e)}
+
+@app.route("/sync_playlist")
+def sync_playlist():
+    sp = get_spotify()
+    if not os.path.exists(QUEUE_FILE):
+        return "Queue not loaded"
+
+    with open(QUEUE_FILE, "r", encoding="utf-8") as f:
+        episodes = json.load(f)
+
+    if not episodes:
+        return "Queue empty"
+
+    chosen = random.choice(episodes)
+    return {"chosen": chosen.get("name")}
+
+
+@app.route("/sync_unplayed")
+def sync_unplayed():
+    if not os.path.exists(UNPLAYED_FILE):
+        return "Unplayed not found"
+
+    with open(UNPLAYED_FILE, "r", encoding="utf-8") as f:
+        episodes = json.load(f)
+
+    if not episodes:
+        return "Unplayed empty"
+
+    chosen = random.choice(episodes)
+    # seçileni listeden çıkar
+    episodes = [ep for ep in episodes if ep["id"] != chosen["id"]]
+
+    with open(UNPLAYED_FILE, "w", encoding="utf-8") as f:
+        json.dump(episodes, f, ensure_ascii=False, indent=2)
+
+    return {"unplayed_chosen": chosen.get("name"), "remaining": len(episodes)}
+
 
 @app.route("/view_queue")
 def view_queue():
     try:
-        queue = load_queue()
+        if not os.path.exists(QUEUE_FILE):
+            return "queue.json bulunamadı!"
+
+        with open(QUEUE_FILE, "r", encoding="utf-8") as f:
+            queue = json.load(f)
+
         if not queue:
             return "queue.json boş görünüyor!"
-        out = "Podcast Queue\n"
-        for ep in queue:
-            out += f"{ep['name']} ({ep['release_date']}) - Not Played\n"
-        return out
+
+        names = [ep.get("name", "??") for ep in queue]
+        return "<br>".join(names)
+
     except Exception as e:
         return f"Hata: {e}"
 
+
+# ================= Run =================
 if _name_ == "_main_":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+    app.run(host="0.0.0.0", port=10000)
