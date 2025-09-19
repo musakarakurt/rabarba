@@ -5,7 +5,7 @@ import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 
 # Flask uygulaması
-app = Flask(_name_)
+app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET", "supersecret")
 
 # Spotify API ayarları
