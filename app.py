@@ -4,7 +4,7 @@ import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 from flask import Flask, redirect, request, session, url_for, render_template
 
-app = Flask(_name_)
+app = Flask(__name__)
 app.secret_key = "supersecret"
 app.config["SESSION_COOKIE_NAME"] = "spotify-login-session"
 
