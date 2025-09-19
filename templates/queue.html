@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <title>Podcast Queue</title>
+</head>
+<body>
+  <h1>Podcast Queue</h1>
+  {% if queue %}
+    <ul>
+      {% for ep in queue %}
+        <li>
+          {{ ep["name"] }} ({{ ep["release_date"] }}) -
+          {% if ep.get("played") %}
+            Played
+          {% else %}
+            Not Played
+          {% endif %}
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p>Queue boş görünüyor!</p>
+  {% endif %}
+</body>
+</html>
