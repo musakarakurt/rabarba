@@ -1,63 +1,46 @@
 import os
 import json
-from flask import Flask, redirect, request, session, url_for
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
+from flask import Flask, redirect, request, session, url_for, render_template
 
-app = Flask(__name__)
-app.secret_key = os.getenv("FLASK_SECRET_KEY", "supersecretkey")
+app = Flask(_name_)
+app.secret_key = "supersecret"
+app.config["SESSION_COOKIE_NAME"] = "spotify-login-session"
 
-# Spotify ayarları
+# Spotify API kimlik bilgileri
 CLIENT_ID = os.getenv("SPOTIPY_CLIENT_ID")
 CLIENT_SECRET = os.getenv("SPOTIPY_CLIENT_SECRET")
 REDIRECT_URI = os.getenv("SPOTIPY_REDIRECT_URI")
-SCOPE = "user-read-email playlist-modify-private playlist-modify-public"
 SHOW_ID = "40ORgVQqJWPQGRMUXmL67y"  # Rabarba podcast ID
 
-# Konuk filtresi
-GUESTS = [
-    "Nuri Çetin",
-    "Kemal Ayça",
-    "İlker Gümüşoluk",
-    "Anlatan Adam",
-    "Anlatanadam",
-    "Alper Çelik",
-    "Ömür Okumuş",
-    "Erman Arıcasoy",
-]
+SCOPE = "user-read-playback-state,user-modify-playback-state,playlist-modify-private,playlist-modify-public"
 
-QUEUE_FILE = "queue.json"
+def get_spotify_oauth():
+    return SpotifyOAuth(
+        client_id=CLIENT_ID,
+        client_secret=CLIENT_SECRET,
+        redirect_uri=REDIRECT_URI,
+        scope=SCOPE
+    )
 
-
-# ---------- Yardımcı Fonksiyonlar ----------
-def load_queue():
-    if not os.path.exists(QUEUE_FILE):
-        return []
-    with open(QUEUE_FILE, "r", encoding="utf-8") as f:
-        try:
-            return json.load(f)
-        except json.JSONDecodeError:
-            return []
-
-
-def save_queue(data):
-    with open(QUEUE_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-
-def get_spotify_client():
-    if "token_info" not in session:
+def get_token():
+    token_info = session.get("token_info", None)
+    if not token_info:
         return None
-    token_info = session["token_info"]
-    return spotipy.Spotify(auth=token_info["access_token"])
-
+    sp_oauth = get_spotify_oauth()
+    if sp_oauth.is_token_expired(token_info):
+        token_info = sp_oauth.refresh_access_token(token_info["refresh_token"])
+        session["token_info"] = token_info
+    return token_info
 
 def fetch_all_episodes(sp):
     all_eps = []
     offset = 0
     limit = 50
+    trid = SHOW_ID
     while True:
-        res = sp.show_episodes(SHOW_ID, limit=limit, offset=offset)
+        res = sp.show_episodes(trid, limit=limit, offset=offset)
         items = res.get("items", []) or []
         items = [it for it in items if isinstance(it, dict)]
         all_eps.extend(items)
@@ -66,85 +49,74 @@ def fetch_all_episodes(sp):
         offset += limit
     return all_eps
 
-
-def is_guest_in_title(title):
-    title_lower = title.lower()
-    return any(g.lower() in title_lower for g in GUESTS)
-
-
-# ---------- Rotalar ----------
 @app.route("/")
 def index():
-    if "token_info" not in session:
-        return redirect(url_for("login"))
     return redirect(url_for("view_queue"))
-
 
 @app.route("/login")
 def login():
-    sp_oauth = SpotifyOAuth(
-        client_id=CLIENT_ID,
-        client_secret=CLIENT_SECRET,
-        redirect_uri=REDIRECT_URI,
-        scope=SCOPE,
-    )
+    sp_oauth = get_spotify_oauth()
     auth_url = sp_oauth.get_authorize_url()
     return redirect(auth_url)
 
-
 @app.route("/callback")
 def callback():
-    sp_oauth = SpotifyOAuth(
-        client_id=CLIENT_ID,
-        client_secret=CLIENT_SECRET,
-        redirect_uri=REDIRECT_URI,
-        scope=SCOPE,
-    )
+    sp_oauth = get_spotify_oauth()
+    session.clear()
     code = request.args.get("code")
-    token_info = sp_oauth.get_access_token(code, as_dict=True)
+    token_info = sp_oauth.get_access_token(code)
     session["token_info"] = token_info
-    return redirect(url_for("index"))
-
+    return redirect(url_for("view_queue"))
 
 @app.route("/load_podcast")
 def load_podcast():
-    sp = get_spotify_client()
-    if not sp:
+    token_info = get_token()
+    if not token_info:
         return redirect(url_for("login"))
+    sp = spotipy.Spotify(auth=token_info["access_token"])
 
     episodes = fetch_all_episodes(sp)
-    queue = load_queue()
 
-    existing_ids = {ep["id"] for ep in queue}
-    new_eps = []
+    if not os.path.exists("queue.json"):
+        with open("queue.json", "w", encoding="utf-8") as f:
+            json.dump([], f)
 
+    with open("queue.json", "r", encoding="utf-8") as f:
+        queue = json.load(f)
+
+    added = 0
     for ep in episodes:
-        name = ep.get("name", "")
-        if is_guest_in_title(name) and ep["id"] not in existing_ids:
-            new_ep = {
-                "id": ep["id"],
+        try:
+            name = ep["name"]
+            release_date = ep["release_date"]
+            eid = ep["id"]
+        except Exception as e:
+            print("[load_podcast] skip invalid episode:", e)
+            continue
+
+        if not any(q["id"] == eid for q in queue):
+            queue.append({
+                "id": eid,
                 "name": name,
-                "release_date": ep.get("release_date", ""),
-                "uri": ep.get("uri", ""),
-                "played": False,
-            }
-            queue.append(new_ep)
-            new_eps.append(new_ep)
+                "release_date": release_date,
+                "played": False
+            })
+            added += 1
 
-    save_queue(queue)
-    return {"queued": len(new_eps), "total": len(queue)}
+    with open("queue.json", "w", encoding="utf-8") as f:
+        json.dump(queue, f, indent=2, ensure_ascii=False)
 
+    return {"queued": added, "total": len(queue)}
 
 @app.route("/view_queue")
 def view_queue():
-    queue = load_queue()
-    html = "<h1>Podcast Queue</h1><ul>"
-    for ep in queue:
-        status = "Played" if ep.get("played") else "Not Played"
-        html += f"<li>{ep['name']} ({ep['release_date']}) - {status}</li>"
-    html += "</ul>"
-    return html
-
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+    try:
+        if not os.path.exists("queue.json"):
+            return "queue.json bulunamadı!"
+        with open("queue.json", "r", encoding="utf-8") as f:
+            queue = json.load(f)
+        if not queue:
+            return "queue.json boş görünüyor!"
+        return render_template("queue.html", queue=queue)
+    except Exception as e:
+        return f"Hata: {e}"
