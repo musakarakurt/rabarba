@@ -57,10 +57,9 @@ def fetch_all_episodes(sp):
     offset = 0
     limit = 50
     while True:
-        res = sp.show_episodes(SHOW_ID, limit=limit, offset=offset)
-        items = res.get("items", [])
-        if not items:
-            break
+        res = sp.show_episodes(trid, limit=limit, offset=offset)
+if not res or "items" not in res:
+    break
         episodes.extend(items)
         if len(items) < limit:
             break
