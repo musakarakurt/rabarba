@@ -1,28 +1,28 @@
 name: Daily Spotify Sync
 
 on:
-  workflow_dispatch:       # Manuel tetikleme
+  workflow_dispatch:
   schedule:
-    - cron: '0 7 * * *'    # Her gün sabah 07:00 UTC
+    - cron: "0 7 * * *"   # Her gün sabah 07:00 UTC
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger load_podcast on Render
-        env:
-          BASE: ${{ secrets.RENDER_BASE_URL }}
+      - name: Trigger load_podcast
         run: |
-          echo "Calling $BASE/load_podcast"
-          curl --fail --silent --show-error --max-time 120 "$BASE/load_podcast" -o /tmp/load_podcast_resp.json
-          echo "load_podcast returned:"
-          cat /tmp/load_podcast_resp.json
+          curl -s -X GET "$RENDER_BASE_URL/load_podcast"
+        env:
+          RENDER_BASE_URL: ${{ secrets.RENDER_BASE_URL }}
 
-      - name: Trigger sync (update queue)
-        env:
-          BASE: ${{ secrets.RENDER_BASE_URL }}
+      - name: Trigger sync_unplayed
         run: |
-          echo "Calling $BASE/sync"
-          curl --fail --silent --show-error --max-time 120 "$BASE/sync" -o /tmp/sync_resp.html
-          echo "sync returned:"
-          head -n 20 /tmp/sync_resp.html
+          curl -s -X GET "$RENDER_BASE_URL/sync_unplayed"
+        env:
+          RENDER_BASE_URL: ${{ secrets.RENDER_BASE_URL }}
+
+      - name: Trigger sync_playlist
+        run: |
+          curl -s -X GET "$RENDER_BASE_URL/sync_playlist"
+        env:
+          RENDER_BASE_URL: ${{ secrets.RENDER_BASE_URL }}
