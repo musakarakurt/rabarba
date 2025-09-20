@@ -1,42 +1,62 @@
 import os
 import json
 import re
-from flask import Flask, redirect, request
+from flask import Flask, redirect, request, session, url_for
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 
 # Flask app
 app = Flask(__name__)
+app.secret_key = os.getenv("FLASK_SECRET", "supersecret")
 
-# Spotify credentials
+# Spotify API credentials
 CLIENT_ID = os.getenv("SPOTIPY_CLIENT_ID")
 CLIENT_SECRET = os.getenv("SPOTIPY_CLIENT_SECRET")
 REDIRECT_URI = os.getenv("SPOTIPY_REDIRECT_URI")
-SHOW_ID = os.getenv("SPOTIFY_SHOW_ID")  # Podcast ID
-SCOPE = "user-library-read playlist-modify-public playlist-modify-private"
+SHOW_ID = os.getenv("SHOW_ID")  # örn: 40ORgVQqJWPQGRMUXmL67y
+
+# Guest filter list (sadece senin verdiğin isimler)
+guests = [
+    "Nuri Çetin",
+    "Kemal Ayça",
+    "İlker Gümüşoluk",
+    "Anlatan Adam",
+    "Anlatanadam",
+    "Alper Çelik",
+    "Ömür Okumuş",
+    "Erman Arıcasoy"
+]
 
 # Queue file
 QUEUE_FILE = "queue.json"
 
-# Guests to include
-GUESTS = ["anlatan adam", "anlatanadam", "kemal ayça", "nuri çetin", "ilker gümüşoluk", "eda nur hancı", "barış akyüz", "erman arıcasoy", "firuze özdemir", "caner dağlı", "rozerin aydın", "elif gizem aykul", "beyza arslan", "seçil buket akıncı", "doğan tunçel", "can kılcıoğlu", "vildan atasever erdem", "doğan akdoğan", "alper çelik", "berk türkmani", "beyza şen", "merve polat", "deniz akbaba", "aslı tüter"]
+def load_queue():
+    if not os.path.exists(QUEUE_FILE):
+        return []
+    try:
+        with open(QUEUE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
 
-# ---- Helpers ----
-def get_spotify():
-    return spotipy.Spotify(auth_manager=SpotifyOAuth(
+def save_queue(queue):
+    with open(QUEUE_FILE, "w", encoding="utf-8") as f:
+        json.dump(queue, f, indent=2, ensure_ascii=False)
+
+def create_spotify_oauth():
+    return SpotifyOAuth(
         client_id=CLIENT_ID,
         client_secret=CLIENT_SECRET,
         redirect_uri=REDIRECT_URI,
-        scope=SCOPE
-    ))
+        scope="user-read-playback-state playlist-modify-public playlist-modify-private"
+    )
 
 def fetch_all_episodes(sp):
     all_eps = []
     offset = 0
     limit = 50
-    trid = SHOW_ID
     while True:
-        res = sp.show_episodes(trid, limit=limit, offset=offset)
+        res = sp.show_episodes(SHOW_ID, limit=limit, offset=offset)
         items = res.get("items", []) or []
         items = [it for it in items if isinstance(it, dict)]
         all_eps.extend(items)
@@ -45,51 +65,62 @@ def fetch_all_episodes(sp):
         offset += limit
     return all_eps
 
-def filter_episodes(episodes):
-    filtered = []
-    for ep in episodes:
-        name = ep.get("name", "").lower()
-        desc = ep.get("description", "").lower()
-
-        # Bölüm numarasını yakala
-        match = re.search(r"(\d{1,4})", ep.get("name", ""))
-        if match:
-            num = int(match.group(1))
-        else:
-            num = 0
-
-        # Konuk filtresi
-        if any(g in name or g in desc for g in GUESTS):
-            ep["_num"] = num
-            filtered.append(ep)
-
-    # Numara + ad sıralaması
-    filtered.sort(key=lambda x: (x.get("_num", 0), x.get("name", "")))
-    return filtered
-
-def save_queue(data):
-    with open(QUEUE_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-def load_queue():
-    if not os.path.exists(QUEUE_FILE):
-        return []
-    with open(QUEUE_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-# ---- Routes ----
 @app.route("/")
 def index():
-    return redirect("/view_queue")
+    if not session.get("token_info"):
+        return redirect(url_for("login"))
+    return """
+    <h1>Logged in</h1>
+    <a href='/load_podcast'>Load Podcast</a><br>
+    <a href='/view_queue'>View Queue</a>
+    """
+
+@app.route("/login")
+def login():
+    sp_oauth = create_spotify_oauth()
+    auth_url = sp_oauth.get_authorize_url()
+    return redirect(auth_url)
+
+@app.route("/callback")
+def callback():
+    sp_oauth = create_spotify_oauth()
+    code = request.args.get("code")
+    token_info = sp_oauth.get_access_token(code, as_dict=False)
+    session["token_info"] = token_info
+    return redirect(url_for("index"))
 
 @app.route("/load_podcast")
 def load_podcast():
     try:
-        sp = get_spotify()
+        sp_oauth = create_spotify_oauth()
+        token_info = session.get("token_info")
+        if not token_info:
+            return redirect(url_for("login"))
+
+        sp = spotipy.Spotify(auth=token_info["access_token"])
         episodes = fetch_all_episodes(sp)
-        filtered = filter_episodes(episodes)
-        save_queue(filtered)
-        return {"queued": len(filtered), "total": len(episodes)}
+
+        queue = []
+        for ep in episodes:
+            title = ep.get("name") or ""
+            match = re.search(r"(\d+)", title)
+            num = int(match.group(1)) if match else 0
+
+            desc = ep.get("description", "")
+            if any(g.lower() in (title + desc).lower() for g in guests):
+                queue.append({
+                    "num": num,
+                    "title": title,
+                    "date": ep.get("release_date"),
+                    "played": False
+                })
+
+        # Numara sıralaması (küçükten büyüğe)
+        queue.sort(key=lambda x: x["num"])
+
+        save_queue(queue)
+
+        return {"queued": len(queue), "total": len(episodes)}
     except Exception as e:
         return {"error": str(e)}
 
@@ -98,14 +129,14 @@ def view_queue():
     try:
         queue = load_queue()
         if not queue:
-            return "queue.json boş görünüyor!"
-        out = ["Podcast Queue"]
+            return "Queue boş görünüyor!"
+        html = "<h1>Podcast Queue</h1><ul>"
         for ep in queue:
-            out.append(f"{ep.get('name')} ({ep.get('release_date')})")
-        return "<br>".join(out)
+            html += f"<li>Rabarba {ep['num']}: {ep['title']} ({ep['date']}) - {'Played' if ep['played'] else 'Not Played'}</li>"
+        html += "</ul>"
+        return html
     except Exception as e:
         return f"Hata: {e}"
 
-# ---- Run ----
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
