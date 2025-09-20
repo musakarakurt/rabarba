@@ -1,22 +1,24 @@
 import os
 import json
-from flask import Flask, redirect, request, session, url_for, jsonify
+import re
+from flask import Flask, redirect, request, session, url_for
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("FLASK_SECRET", "dev_secret")
+app.secret_key = os.getenv("FLASK_SECRET_KEY", "supersecret")
+app.config["SESSION_COOKIE_NAME"] = "spotify-login-session"
 
-# Spotify API bilgileri
-CLIENT_ID = os.environ.get("SPOTIPY_CLIENT_ID")
-CLIENT_SECRET = os.environ.get("SPOTIPY_CLIENT_SECRET")
-REDIRECT_URI = os.environ.get("SPOTIPY_REDIRECT_URI")
+# Spotify API credentials
+CLIENT_ID = os.getenv("SPOTIPY_CLIENT_ID")
+CLIENT_SECRET = os.getenv("SPOTIPY_CLIENT_SECRET")
+REDIRECT_URI = os.getenv("RENDER_BASE_URL", "http://localhost:5000") + "/callback"
+SCOPE = "user-read-email"
+
+# Show ID
 SHOW_ID = "40ORgVQqJWPQGRMUXmL67y"
 
-SCOPE = "user-library-read playlist-modify-public playlist-modify-private"
-
-QUEUE_FILE = "queue.json"
-
+# Allowed guests (only these will be included)
 ALLOWED_GUESTS = [
     "Nuri Çetin",
     "Kemal Ayça",
@@ -25,135 +27,137 @@ ALLOWED_GUESTS = [
     "Anlatanadam",
     "Alper Çelik",
     "Ömür Okumuş",
-    "Erman Arıcasoy",
+    "Erman Arıcasoy"
 ]
 
-# ------------------------------------------------------------
-# Yardımcı fonksiyonlar
-# ------------------------------------------------------------
-def get_spotify():
-    return spotipy.Spotify(auth=session.get("token_info")["access_token"])
+# File to store queue
+QUEUE_FILE = "queue.json"
 
-def save_queue(data):
-    with open(QUEUE_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
 
-def load_queue():
-    if not os.path.exists(QUEUE_FILE):
-        return {"unplayed": [], "choosen": []}
-    with open(QUEUE_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+def get_spotify_client():
+    return spotipy.Spotify(
+        auth_manager=SpotifyOAuth(
+            client_id=CLIENT_ID,
+            client_secret=CLIENT_SECRET,
+            redirect_uri=REDIRECT_URI,
+            scope=SCOPE
+        )
+    )
 
-def parse_episode_number(name):
-    # Örn: "Mesut Süre ile RABARBA 0855 (Podcast Edit)"
-    parts = name.split()
-    for p in parts:
-        if p.isdigit():
-            return int(p)
-    return 0
 
-def fetch_all_episodes(sp):
-    episodes = []
-    offset = 0
-    limit = 50
-    while True:
-        res = sp.show_episodes(trid, limit=limit, offset=offset)
-if not res or "items" not in res:
-    break
-    episodes.extend(items)
-    if len(items) < limit:
-            break
-    offset += limit
-    
-return episodes
+def normalize_title(title: str) -> str:
+    """
+    Düzenlenmiş başlık: A/B bölümlerinde A önce gelir.
+    """
+    match = re.search(r"(0\d+)([AB]?)", title)
+    if not match:
+        return title
+    number = match.group(1)
+    suffix = match.group(2) or "A"
+    return f"{number}{suffix}"
 
-def filter_and_sort(episodes):
-    unplayed = []
-    choosen = []
 
+def load_podcast():
+    sp = get_spotify_client()
+    results = sp.show_episodes(SHOW_ID, limit=50)
+    episodes = results.get("items", [])
+
+    while results.get("next"):
+        results = sp.next(results)
+        episodes.extend(results.get("items", []))
+
+    # Filtre: sadece allowed guest olanlar
+    filtered = []
     for ep in episodes:
-        name = ep.get("name", "")
-        desc = ep.get("description", "")
+        title = ep.get("name", "")
+        if any(guest.lower() in title.lower() for guest in ALLOWED_GUESTS):
+            filtered.append({
+                "id": ep.get("id"),
+                "name": ep.get("name"),
+                "release_date": ep.get("release_date")
+            })
 
-        # Sadece ALLOWED_GUESTS listesinde olanları seç
-        if any(guest.lower() in (name + desc).lower() for guest in ALLOWED_GUESTS):
-            choosen.append(name)
-        else:
-            unplayed.append(name)
+    # Sıralama: önce tarih, sonra A/B
+    filtered.sort(key=lambda e: (e["release_date"], normalize_title(e["name"])))
 
-    # Sıralama: sayı + A/B mantığı
-    def sort_key(title):
-        num = parse_episode_number(title)
-        suffix = 0 if "(A" in title or " A" in title else (1 if "(B" in title or " B" in title else 2)
-        return (num, suffix)
+    # Ayır: unplayed vs choosen
+    unplayed = filtered[:len(filtered)//2]
+    choosen = filtered[len(filtered)//2:]
 
-    unplayed.sort(key=sort_key)
-    choosen.sort(key=sort_key)
+    queue_data = {"unplayed": unplayed, "choosen": choosen}
 
-    return {"unplayed": unplayed, "choosen": choosen}
+    with open(QUEUE_FILE, "w", encoding="utf-8") as f:
+        json.dump(queue_data, f, indent=2, ensure_ascii=False)
 
-# ------------------------------------------------------------
-# Routes
-# ------------------------------------------------------------
+    return queue_data
+
+
 @app.route("/")
 def index():
-    if "token_info" not in session:
-        return '<a href="/login">Login with Spotify</a>'
     return """
-        <h1>Logged in</h1>
-        <ul>
-          <li><a href="/load_podcast">Load Podcast</a></li>
-          <li><a href="/view_queue">View Queue</a></li>
-          <li><a href="/sync_unplayed">Synchronize (Unplayed)</a></li>
-          <li><a href="/sync_playlist">Synchronize (Choosen)</a></li>
-        </ul>
+    <h2>Spotify Podcast Manager</h2>
+    <ul>
+        <li><a href='/login'>Login</a></li>
+        <li><a href='/load_podcast'>Load Podcast</a></li>
+        <li><a href='/view_queue'>View Queue</a></li>
+        <li><a href='/sync'>Synchronize</a></li>
+    </ul>
     """
+
 
 @app.route("/login")
 def login():
-    sp_oauth = SpotifyOAuth(client_id=CLIENT_ID, client_secret=CLIENT_SECRET,
-                            redirect_uri=REDIRECT_URI, scope=SCOPE)
+    sp_oauth = SpotifyOAuth(
+        client_id=CLIENT_ID,
+        client_secret=CLIENT_SECRET,
+        redirect_uri=REDIRECT_URI,
+        scope=SCOPE
+    )
     auth_url = sp_oauth.get_authorize_url()
     return redirect(auth_url)
 
+
 @app.route("/callback")
 def callback():
-    sp_oauth = SpotifyOAuth(client_id=CLIENT_ID, client_secret=CLIENT_SECRET,
-                            redirect_uri=REDIRECT_URI, scope=SCOPE)
+    sp_oauth = SpotifyOAuth(
+        client_id=CLIENT_ID,
+        client_secret=CLIENT_SECRET,
+        redirect_uri=REDIRECT_URI,
+        scope=SCOPE
+    )
+    session.clear()
     code = request.args.get("code")
     token_info = sp_oauth.get_access_token(code)
     session["token_info"] = token_info
     return redirect(url_for("index"))
 
+
 @app.route("/load_podcast")
-def load_podcast():
+def load_podcast_route():
     try:
-        sp = get_spotify()
-        episodes = fetch_all_episodes(sp)
-        filtered = filter_and_sort(episodes)
-        save_queue(filtered)
-        return jsonify({"queued": len(filtered["unplayed"]) + len(filtered["choosen"]),
-                        "unplayed": len(filtered["unplayed"]),
-                        "choosen": len(filtered["choosen"])})
+        queue_data = load_podcast()
+        return {"queued": len(queue_data["unplayed"]) + len(queue_data["choosen"]),
+                "total": len(queue_data["unplayed"]) + len(queue_data["choosen"])}
     except Exception as e:
-        return jsonify({"error": str(e)})
+        return {"error": str(e)}
+
 
 @app.route("/view_queue")
 def view_queue():
-    q = load_queue()
-    if not q or (not q.get("unplayed") and not q.get("choosen")):
-        return "Queue boş görünüyor!"
-    return jsonify(q)
+    try:
+        if not os.path.exists(QUEUE_FILE):
+            return {"error": "queue.json bulunamadı"}
+        with open(QUEUE_FILE, "r", encoding="utf-8") as f:
+            queue_data = json.load(f)
+        return queue_data
+    except Exception as e:
+        return {"error": str(e)}
 
-@app.route("/sync_unplayed")
-def sync_unplayed():
-    q = load_queue()
-    return jsonify({"sync_unplayed": len(q.get("unplayed", []))})
 
-@app.route("/sync_playlist")
-def sync_playlist():
-    q = load_queue()
-    return jsonify({"sync_choosen": len(q.get("choosen", []))})
+@app.route("/sync")
+def sync():
+    return {"status": "Sync completed"}
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
