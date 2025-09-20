@@ -60,11 +60,12 @@ def fetch_all_episodes(sp):
         res = sp.show_episodes(trid, limit=limit, offset=offset)
 if not res or "items" not in res:
     break
-        episodes.extend(items)
-        if len(items) < limit:
+    episodes.extend(items)
+    if len(items) < limit:
             break
-        offset += limit
-    return episodes
+    offset += limit
+    
+return episodes
 
 def filter_and_sort(episodes):
     unplayed = []
