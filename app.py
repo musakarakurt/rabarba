@@ -55,15 +55,19 @@ def fetch_all_episodes(sp):
     all_eps = []
     offset = 0
     limit = 50
+    trid = SHOW_ID
     while True:
-        res = sp.show_episodes(SHOW_ID, limit=limit, offset=offset)
-        items = res.get("items", []) or []
-        items = [it for it in items if isinstance(it, dict)]
-        all_eps.extend(items)
+        res = sp.show_episodes(trid, limit=limit, offset=offset) or {}
+        items = res.get("items", [])
+        if not isinstance(items, list):
+            break
+        clean_items = [it for it in items if isinstance(it, dict)]
+        all_eps.extend(clean_items)
         if len(items) < limit:
             break
         offset += limit
     return all_eps
+
 
 @app.route("/")
 def index():
@@ -99,6 +103,9 @@ def load_podcast():
 
         sp = spotipy.Spotify(auth=token_info["access_token"])
         episodes = fetch_all_episodes(sp)
+if not episodes:
+    return jsonify({"error": "No episodes fetched"})
+
 
         queue = []
         for ep in episodes:
